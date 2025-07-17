@@ -1,117 +1,130 @@
-import numpy as np
 import cv2
+import numpy as np
 from cv2 import aruco
-import time
 
-# マーカー情報
-marker_id_map = {
-    0: 'top_left',
-    4: 'top_right',
-    19: 'bottom_right',
-    15: 'bottom_left'
-}
-corner_name_to_index = {
-    'top_left': 0,
-    'top_right': 1,
-    'bottom_right': 2,
-    'bottom_left': 3
-}
-TRACKED_IDS = [1, 2, 3]
-
-# 状態保持
-prev_id_to_corner = {}
-prev_data = {i: {'tx_warped': 0, 'ty_warped': 0, 'rot': 0} for i in TRACKED_IDS}
-last_detect_time = 0
-detect_interval = 0.01
-
-# キャプチャ初期化
-cap = cv2.VideoCapture(0)  # カメラID 0
-
-width, height = 1280, 720
+# --- ArUco 辞書と検出パラメータの設定 ---
 aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_6X6_250)
 parameters = aruco.DetectorParameters_create()
+parameters.adaptiveThreshWinSizeMin = 3
+parameters.adaptiveThreshWinSizeMax = 23
+parameters.adaptiveThreshConstant = 7
+parameters.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
+
+# 四隅マーカー用 ID マップ
+marker_id_map = {0:'top_left', 4:'top_right', 19:'bottom_right', 15:'bottom_left'}
+
+# ワープ後画像サイズ
+WARPED_WIDTH, WARPED_HEIGHT = 1600, 900
+
+# カメラ初期化
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+if not cap.isOpened():
+    print("カメラが開けませんでした")
+    exit()
+print("カメラ起動成功")
+
+last_valid_src_pts = None
+
+# ID=1,2 の最後の中心座標と角度を保存する辞書
+# 例: last_pos[1] = {'center': np.array([x,y]), 'angle': 123.4}
+last_pos = {}
+
+# 可視化用色設定
+colors = {1: (0,255,0), 2: (255,0,0)}  # 1: 緑, 2: 青
 
 while True:
     ret, frame = cap.read()
     if not ret:
+        print("フレーム取得失敗")
         continue
 
-    frame = cv2.flip(frame, 0)  # TouchDesignerと同じように上下反転
+    # 元フレームをグレースケール検出用に変換
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    display = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
-    current_time = time.time()
-    run_detection = (current_time - last_detect_time) > detect_interval
+    # 元画像上でマーカー検出（四隅用）
+    corners, ids, _ = aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
+    if ids is not None:
+        aruco.drawDetectedMarkers(display, corners, ids)
+        id_corner_map = {int(i[0]): c[0] for i, c in zip(ids, corners)}
+        if all(mid in id_corner_map for mid in marker_id_map):
+            last_valid_src_pts = np.array([
+                id_corner_map[0][0],
+                id_corner_map[4][1],
+                id_corner_map[19][2],
+                id_corner_map[15][3]
+            ], dtype=np.float32)
 
-    marker_corners, marker_ids = [], None
-    if run_detection:
-        marker_corners, marker_ids, _ = aruco.detectMarkers(frame, aruco_dict, parameters=parameters)
-        last_detect_time = current_time
-
-        current_id_to_corner = {}
-        if marker_ids is not None:
-            for i, marker_id in enumerate(marker_ids.flatten()):
-                if marker_id in marker_id_map:
-                    corner_name = marker_id_map[marker_id]
-                    corner_index = corner_name_to_index[corner_name]
-                    current_id_to_corner[corner_name] = marker_corners[i][0][corner_index]
-
-            prev_id_to_corner.update(current_id_to_corner)
-
-    if all(corner in prev_id_to_corner for corner in corner_name_to_index.keys()):
-        src_pts = np.array([
-            prev_id_to_corner['top_left'],
-            prev_id_to_corner['top_right'],
-            prev_id_to_corner['bottom_right'],
-            prev_id_to_corner['bottom_left']
-        ], dtype="float32")
-        dst_pts = np.array([
+    # ワープ処理
+    if last_valid_src_pts is not None:
+        dst = np.array([
             [0, 0],
-            [width - 1, 0],
-            [width - 1, height - 1],
-            [0, height - 1]
-        ], dtype="float32")
+            [WARPED_WIDTH - 1, 0],
+            [WARPED_WIDTH - 1, WARPED_HEIGHT - 1],
+            [0, WARPED_HEIGHT - 1]
+        ], dtype=np.float32)
+        M = cv2.getPerspectiveTransform(last_valid_src_pts, dst)
+        warped = cv2.warpPerspective(frame, M, (WARPED_WIDTH, WARPED_HEIGHT))
 
-        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        warped = cv2.warpPerspective(frame, M, (width, height))
-        warped = cv2.flip(warped, 0)
+        # 補正後画像でマーカー検出（1,2用）
+        warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        corners_w, ids_w, _ = aruco.detectMarkers(warped_gray, aruco_dict, parameters=parameters)
+        detected_ids = [] if ids_w is None else ids_w.flatten().tolist()
 
-        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 110, 255, cv2.THRESH_BINARY)
+        # 検出マーカーを可視化
+        if ids_w is not None:
+            aruco.drawDetectedMarkers(warped, corners_w, ids_w)
 
-        # 表示
-        cv2.imshow("Warped Binary", binary)
+        # 1,2 を順に処理
+        for mid in (1, 2):
+            if mid in detected_ids:
+                # マーカー検出できたら中心と角度を再計算・保存
+                idx = detected_ids.index(mid)
+                c = corners_w[idx][0].astype(np.float32)
+                center = c.mean(axis=0)
+                vec = c[1] - c[0]
+                angle = (np.degrees(np.arctan2(vec[1], vec[0])) + 360) % 360
 
-        if marker_ids is not None:
-            for i, marker_id in enumerate(marker_ids.flatten()):
-                if marker_id in TRACKED_IDS:
-                    pts = marker_corners[i][0]
-                    center = np.mean(pts, axis=0)
-                    vec = pts[1] - pts[0]
-                    angle = np.arctan2(-vec[1], vec[0])
-                    rot = np.degrees(angle)
+                # 保存
+                last_pos[mid] = {'center': center, 'angle': angle}
+                print(f"→ ID={mid} current center: ({center[0]:.1f}, {center[1]:.1f}), angle: {angle:.1f}°")
+            else:
+                # 未検出なら最後の値を出力
+                if mid in last_pos:
+                    center = last_pos[mid]['center']
+                    angle = last_pos[mid]['angle']
+                    print(f"→ ID={mid} not detected, using last center: ({center[0]:.1f}, {center[1]:.1f}), angle: {angle:.1f}°")
+                else:
+                    print(f"→ ID={mid} has no previous data yet")
+                    continue
 
-                    center_pt = np.array([[center]], dtype=np.float32)
-                    warped_pt = cv2.perspectiveTransform(center_pt, M)[0][0]
-                    tx_warped = warped_pt[0] / width
-                    ty_warped = 1.0 - (warped_pt[1] / height)
+            # 可視化：中心、矢印、テキスト
+            color = colors[mid]
+            cv2.circle(warped, tuple(center.astype(int)), 6, color, -1)
+            # 矢印方向は角度から再計算
+            rad = np.radians(angle)
+            tip = (center + 50 * np.array([np.cos(rad), np.sin(rad)])).astype(int)
+            cv2.arrowedLine(warped,
+                            tuple(center.astype(int)),
+                            tuple(tip),
+                            color, 2, tipLength=0.2)
+            cv2.putText(warped,
+                        f"ID{mid}: {angle:.1f}°",
+                        (int(center[0]) + 10, int(center[1]) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-                    prev_data[marker_id] = {
-                        'tx_warped': tx_warped,
-                        'ty_warped': ty_warped,
-                        'rot': rot
-                    }
-
+        cv2.imshow("Warped", warped)
     else:
-        if run_detection and marker_ids is not None:
-            display = aruco.drawDetectedMarkers(frame.copy(), marker_corners, marker_ids)
-            display = cv2.flip(display, 0)
-            cv2.imshow("Detection", display)
+        cv2.putText(display,
+                    "四隅マーカーをすべて検出してください",
+                    (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-    # 結果表示（コンソール）
-    for id_val in TRACKED_IDS:
-        data = prev_data[id_val]
-        print(f"ID {id_val}: tx={data['tx_warped']:.2f}, ty={data['ty_warped']:.2f}, rot={data['rot']:.2f}")
+    # 元画像と検出マーカーの表示
+    cv2.imshow("Original + Markers", display)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(10) & 0xFF == ord('q'):
         break
 
 cap.release()
