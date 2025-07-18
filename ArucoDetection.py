@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from cv2 import aruco
 from pythonosc import udp_client
+import time
 
 # --- OSC クライアント設定 ---
 OSC_IP   = "127.0.0.1"
@@ -20,36 +21,51 @@ parameters.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
 marker_id_map = {0:'top_left', 4:'top_right', 19:'bottom_right', 15:'bottom_left'}
 WARPED_WIDTH, WARPED_HEIGHT = 1920, 1080
 
-# カメラ初期化
+# ターゲットとして OSC 送信するマーカー ID
+target_ids = [1, 2]
+
+# --- カメラ初期化 ---
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 420)
+
 if not cap.isOpened():
     print("カメラが開けませんでした")
     exit()
 print("カメラ起動成功")
 
+# --- FPS 制御設定 ---
+DESIRED_FPS = 60  # 目標フレームレート
+frame_interval = 1.0 / DESIRED_FPS
+cap.set(cv2.CAP_PROP_FPS, DESIRED_FPS)
+print(f"FPSを{DESIRED_FPS}に設定要求 → 実際のFPS: {cap.get(cv2.CAP_PROP_FPS):.1f}")
+
 last_valid_src_pts = None
-last_pos = {}            # IDごとの最後のデータ保存
-target_ids = [1, 2]      # 送信対象
+last_pos = {}  # 各マーカーの最終位置・角度保存用
 
 while True:
+    t0 = time.time()
+
+    # フレーム取得
     ret, frame = cap.read()
     if not ret:
         continue
 
-    # グレースケール変換 → 元画像上で四隅検出
+    # グレースケール変換 → 元画像上で四隅マーカー検出
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     corners, ids, _ = aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
     if ids is not None:
         id_map = {int(i[0]): c[0] for i, c in zip(ids, corners)}
+        # 四隅すべて見つかったら透視変換用座標を更新
         if all(mid in id_map for mid in marker_id_map):
             last_valid_src_pts = np.array([
-                id_map[0][0], id_map[4][1],
-                id_map[19][2], id_map[15][3]
+                id_map[0][0],
+                id_map[4][1],
+                id_map[19][2],
+                id_map[15][3]
             ], dtype=np.float32)
 
-    # ワープ処理
+    # 透視変換（ワープ）
     if last_valid_src_pts is not None:
         dst = np.array([
             [0, 0],
@@ -60,12 +76,12 @@ while True:
         M = cv2.getPerspectiveTransform(last_valid_src_pts, dst)
         warped = cv2.warpPerspective(frame, M, (WARPED_WIDTH, WARPED_HEIGHT))
 
-        # 補正後でマーカー検出
+        # ワープ後に再度マーカー検出
         warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         corners_w, ids_w, _ = aruco.detectMarkers(warped_gray, aruco_dict, parameters=parameters)
         detected = [] if ids_w is None else ids_w.flatten().tolist()
 
-        # 各ターゲット ID を処理
+        # ターゲットIDごとに中心座標と角度を計算し OSC 送信
         for mid in target_ids:
             if mid in detected:
                 idx = detected.index(mid)
@@ -73,21 +89,28 @@ while True:
                 center = c.mean(axis=0)
                 vec = c[1] - c[0]
                 angle = (np.degrees(np.arctan2(vec[1], vec[0])) + 360) % 360
-
                 last_pos[mid] = (float(center[0]), float(center[1]), float(angle))
-            # 未検出時は last_pos をそのまま使う（初回検出前は無視）
+            # 検出されないときは前回値を使う
             if mid in last_pos:
                 x, y, a = last_pos[mid]
-                # OSC 送信
                 client.send_message(f"/marker/{mid}", [x, y, a])
                 print(f"Sent /marker/{mid} → x={x:.1f}, y={y:.1f}, angle={a:.1f}")
 
-        # （必要なら可視化コードをここに）
-
+        # 可視化（必要なら追記）
         cv2.imshow("Warped", warped)
 
-    if cv2.waitKey(10) & 0xFF == ord('q'):
-        break
+    # --- ループ制御：目標FPSに合わせて待機 ---
+    elapsed = time.time() - t0
+    to_wait = frame_interval - elapsed
+    if to_wait > 0:
+        ms = int(to_wait * 1000)
+        if cv2.waitKey(ms) & 0xFF == ord('q'):
+            break
+    else:
+        # 処理が遅い場合でも最低限キー入力をチェック
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
+# 後処理
 cap.release()
 cv2.destroyAllWindows()
