@@ -13,8 +13,6 @@ float tx2 = 0, ty2 = 0, tAng2 = 0;
 // Smoothing factor (0 = no movement, 1 = instant)
 float smoothing = 0.05;
 
-// --- ここから追加 ---
-
 // 円の見た目に関する設定
 float circleSize = 50;
 float circleRadius = circleSize / 2;
@@ -33,14 +31,15 @@ void setup() {
   osc = new OscP5(this, 8000);
   ellipseMode(CENTER);
   textAlign(LEFT, BOTTOM);
+  
   // 初期値をターゲットに合わせる
-
   tx1 = x1;
   ty1 = y1;
   tAng1 = ang1;
   tx2 = x2;
   ty2 = y2;
   tAng2 = ang2;
+  fullScreen();
 }
 
 
@@ -49,6 +48,7 @@ void draw() {
   fill(32, 32, 32, 30);  // 背景に半透明の黒を塗ることで残像を表現
   rect(0, 0, width, height);
   //background(32);
+  
   // 線形補間でスムーズに移動
   x1 = lerp(x1, tx1, smoothing);
   y1 = lerp(y1, ty1, smoothing);
@@ -56,12 +56,12 @@ void draw() {
   x2 = lerp(x2, tx2, smoothing);
   y2 = lerp(y2, ty2, smoothing);
   ang2 = lerp(ang2, tAng2, smoothing);
-  // ID=1 を緑、ID=2 を青で描画
+  
+  
   fill(255);
   ellipse(x1, y1, circleSize, circleSize);
   text("ID1: (" + nf(x1, 1, 1) + ", " + nf(y1, 1, 1) + ")  " + nf(ang1, 1, 1) + "°", 10, 20);
   ellipse(x2, y2, circleSize, circleSize);
-
   text("ID2: (" + nf(x2, 1, 1) + ", " + nf(y2, 1, 1) + ")  " + nf(ang2, 1, 1) + "°", 10, 40);
 
   int count  = 100;// 点の数
@@ -80,6 +80,10 @@ void draw() {
   float noiseScale = 0.05; // ノイズのスケール
   float noiseStrength = 100; // ゆらぎの強さ（px単位）
 
+  float distBetweenTargets = dist(tx1, ty1, tx2, ty2);
+  float baseRadius = map(distBetweenTargets, 0, width, 0, width); // 必要に応じてmin/max調整
+
+  // --- 描画ループ内 ---
   for (int j = 0; j < count; j++) {
     float o = float(j) / (count - 1);
     float twist = map(ang2, 0, 360, -PI, PI);  // ねじれの最大幅
@@ -88,9 +92,9 @@ void draw() {
     for (int i = 0; i < 50; i++) {
       float angle = TWO_PI * i / 50 + baseAngle + offset;
 
-      // --- ここでノイズを使用して距離を揺らがせる ---
+      // --- ノイズを使用して距離を揺らがせる ---
       float noiseFactor = noise(j * 0.1, i * 0.1, frameCount * 0.01);
-      radius = (width * 0.5) * o * (0.7 + 0.6 * noiseFactor);
+      radius = baseRadius * o * (0.7 + 0.6 * noiseFactor);  // ← ここを修正
 
       float x = cx + sin(angle) * radius;
       float y = cy + cos(angle) * radius;
@@ -101,7 +105,7 @@ void draw() {
   }
 
   // 角度に応じて回転速度を変える（最大±0.01rad/frame）
-  float angleSpeed = map(ang1, 0, 360, -TWO_PI * 0.001, TWO_PI * 0.001);
+  float angleSpeed = map(ang1, 0, 360, -TWO_PI * 0.005, TWO_PI * 0.005);
   baseAngle += angleSpeed;
   //baseAngle+=TWO_PI*0.001;
 }
@@ -109,33 +113,21 @@ void draw() {
 
 
 // OSC メッセージ受信
-
 void oscEvent(OscMessage msg) {
-
   // マウスでドラッグ中はOSCの座標更新を無視する
-
   if (draggedId != 0) {
-
     return;
   }
-
-
 
   String addr = msg.addrPattern();
 
   if (addr.equals("/marker/1")) {
-
-    tx1 = width - msg.get(0).floatValue();
-
+    tx1 = msg.get(0).floatValue();
     ty1 = msg.get(1).floatValue();
-
     tAng1 = msg.get(2).floatValue();
   } else if (addr.equals("/marker/2")) {
-
-    tx2 = width - msg.get(0).floatValue();
-
+    tx2 = msg.get(0).floatValue();
     ty2 = msg.get(1).floatValue();
-
     tAng2 = msg.get(2).floatValue();
   }
 }
@@ -152,29 +144,18 @@ void oscEvent(OscMessage msg) {
 void mousePressed() {
 
   // マウスと円の中心との距離を計算
-
   float d1 = dist(mouseX, mouseY, x1, y1);
-
   float d2 = dist(mouseX, mouseY, x2, y2);
 
-
-
   // マウスが円の中にあるか判定
-
   if (d1 < circleRadius) {
-
     // 円1をクリックした
-
     draggedId = 1;
   } else if (d2 < circleRadius) {
-
     // 円2をクリックした
-
     draggedId = 2;
   } else {
-
     // 何もない場所をクリックした
-
     draggedId = 0;
   }
 }
@@ -188,7 +169,6 @@ void mousePressed() {
  */
 
 void mouseDragged() {
-
   if (draggedId == 1) {
     // 円1をドラッグ中なら、円1の目標位置をマウス座標に更新
     tx1 = mouseX;
@@ -206,15 +186,12 @@ void mouseDragged() {
  */
 
 void mouseReleased() {
-
   // どの円もドラッグしていない状態に戻す
-
   draggedId = 0;
 }
 
 void mouseWheel(MouseEvent event) {
   float delta = event.getCount(); // スクロール量（1または-1）
-
   // どちらかの円がクリックされているときだけ操作
   if (draggedId == 1) {
     tAng1 += delta * 5; // 角度を増減（調整可）
